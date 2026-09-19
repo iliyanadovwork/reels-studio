@@ -1,0 +1,204 @@
+'use client';
+
+// Design harness for the Reddit card template — dev-only playground, not linked from the app.
+// Renders sample data through the real renderer, then shows: the full card, a simulated
+// narration-reveal sequence (the crop steps the reveal system will produce), and the narration
+// line map (bboxes + reveal boundaries) for debugging.
+
+import { useEffect, useRef, useState } from 'react';
+import { renderRedditCard, type RedditCardData } from '@/lib/redditCard';
+import type { Dwell } from '@/lib/redditDwell';
+import type { MemeLine } from '@/lib/memeOcr';
+
+const SAMPLE: RedditCardData = {
+  user: { name: 'u/Raxza' },
+  timeAgo: '7h',
+  title: 'If you hit a $50 million jackpot on a slot machine, would the casino actually pay you, or find some excuse to wriggle out of it?',
+  score: '46',
+  commentCount: '108',
+  comments: [
+    {
+      user: { name: 'larphraulen' },
+      timeAgo: '6d ago',
+      score: '38',
+      body: 'I am going to say that if you have any desire to have kids in the future, you will absolutely resent him (for good reason) when that time comes. I almost guarantee you will split then when it\'s very costly and very inconvenient.\n\nEven if he gets *some* of his act together (because he will not 100% based on the amount of time he\'s had to establish this lifestlye), this will still be a lonely, uphill battle.',
+    },
+    {
+      user: { name: 'CursedHunger' },
+      timeAgo: '6d ago',
+      score: '6',
+      depth: 1,
+      body: 'I agree 100%.\n\nI speak from my experience, having kids makes life so much harder. You loose all your free time and energy. If you make kids with addicted person, it will only get worse in most cases.',
+    },
+    {
+      user: { name: 'Chocotaco4ever' },
+      timeAgo: '6d ago',
+      depth: 2,
+      isOP: true,
+      body: 'This is what I needed to hear. Thank you for being honest with me.',
+    },
+  ],
+};
+
+export default function RedditCardDev() {
+  const [img, setImg] = useState<string>('');
+  const [lines, setLines] = useState<MemeLine[]>([]);
+  const [dwells, setDwells] = useState<Dwell[]>([]);   // silent holds on the post image, if it has one
+  const [dims, setDims] = useState({ w: 0, h: 0 });
+  const [debug, setDebug] = useState(false);
+  const [revealIdx, setRevealIdx] = useState<number | null>(null);
+  const [data, setData] = useState<RedditCardData>(SAMPLE);
+  const [threadUrl, setThreadUrl] = useState('');
+  const [importState, setImportState] = useState('');
+  const overlayRef = useRef<HTMLCanvasElement>(null);
+
+  // Import a real thread through /api/reddit and render it (first 4 comments for the demo).
+  async function importThread() {
+    setImportState('importing…');
+    try {
+      const res = await fetch('/api/reddit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: threadUrl }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? 'import failed');
+      setData({ ...json.post, comments: json.comments.slice(0, 4) });
+      setImportState(`imported · ${json.comments.length} comments available`);
+    } catch (e) {
+      setImportState(e instanceof Error ? e.message : 'import failed');
+    }
+  }
+
+  useEffect(() => {
+    let url = '';
+    renderRedditCard(data).then(r => {
+      url = URL.createObjectURL(r.blob);
+      setImg(url);
+      setLines(r.lines);
+      setDwells(r.dwells);
+      setDims({ w: r.width, h: r.height });
+      setRevealIdx(null);
+    });
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [data]);
+
+  // debug overlay: line bboxes (green) + reveal boundaries (red)
+  useEffect(() => {
+    const cv = overlayRef.current;
+    if (!cv || !dims.w) return;
+    cv.width = dims.w; cv.height = dims.h;
+    const ctx = cv.getContext('2d')!;
+    ctx.clearRect(0, 0, dims.w, dims.h);
+    if (!debug) return;
+    for (const l of lines) {
+      ctx.strokeStyle = 'rgba(70,209,96,0.8)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(l.x0 * dims.w, l.y0 * dims.h, (l.x1 - l.x0) * dims.w, (l.y1 - l.y0) * dims.h);
+      ctx.strokeStyle = 'rgba(255,69,0,0.9)';
+      ctx.beginPath();
+      ctx.moveTo(0, l.bottomFrac * dims.h);
+      ctx.lineTo(dims.w, l.bottomFrac * dims.h);
+      ctx.stroke();
+    }
+    // Dwell boundary (blue): the image reveals to HERE, in silence, after the last line above it.
+    for (const d of dwells) {
+      ctx.strokeStyle = 'rgba(77,157,246,0.95)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(0, d.bottomFrac * dims.h);
+      ctx.lineTo(dims.w, d.bottomFrac * dims.h);
+      ctx.stroke();
+    }
+  }, [debug, lines, dwells, dims]);
+
+  const visibleFrac = revealIdx === null ? 1 : lines[revealIdx]?.bottomFrac ?? 1;
+  const display = 420;
+  const scale = dims.w ? display / dims.w : 1;
+
+  return (
+    <div style={{ minHeight: '100vh', background: '#0b0d0e', color: '#d7dadc', padding: 32, fontFamily: 'system-ui' }}>
+      <h1 style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Reddit card template — design harness</h1>
+      <p style={{ fontSize: 13, color: '#8ba2ad', marginBottom: 20 }}>
+        Real renderer output. Use the reveal slider to preview the narration crop; toggle debug to see the line map.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14, fontSize: 13 }}>
+        <input
+          value={threadUrl}
+          onChange={e => setThreadUrl(e.target.value)}
+          placeholder="Paste a Reddit thread URL to render it for real…"
+          style={{ width: 420, background: '#14181b', border: '1px solid #2a3236', borderRadius: 8, color: '#f2f4f5', padding: '7px 10px' }}
+        />
+        <button onClick={importThread} disabled={!threadUrl.trim()} style={{ background: '#0a67c2', color: '#fff', border: 0, borderRadius: 6, padding: '7px 14px', cursor: 'pointer' }}>
+          import
+        </button>
+        <span style={{ color: '#8ba2ad' }}>{importState}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginBottom: 24, fontSize: 13 }}>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input type="checkbox" checked={debug} onChange={e => setDebug(e.target.checked)} /> line map
+        </label>
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          reveal step
+          <input
+            type="range" min={-1} max={lines.length - 1} step={1}
+            value={revealIdx === null ? lines.length - 1 : revealIdx}
+            onChange={e => { const v = Number(e.target.value); setRevealIdx(v < 0 ? 0 : v); }}
+            style={{ width: 260 }}
+          />
+          <span style={{ minWidth: 120 }}>
+            {revealIdx === null ? 'full card' : `after line ${revealIdx + 1}: “${lines[revealIdx]?.text.slice(0, 24)}…”`}
+          </span>
+          <button onClick={() => setRevealIdx(null)} style={{ background: '#1a3a5c', color: '#fff', border: 0, borderRadius: 6, padding: '4px 10px', cursor: 'pointer' }}>full</button>
+        </label>
+      </div>
+      {img && (
+        <div style={{ display: 'flex', gap: 32, alignItems: 'flex-start' }}>
+          {/* reveal-cropped view with the teleprompter reading window, as the reel will show it:
+              on-canvas the card is 886px wide with the reveal front pinned to the frame midline
+              (960px) — scaled to this preview, the window is 960 * (display/886) px tall. */}
+          {(() => {
+            const windowH = 960 * (display / 886);
+            const cropH = dims.h * scale * visibleFrac;
+            const shift = Math.max(0, cropH - windowH);
+            return (
+              <div style={{ width: display }}>
+                <div style={{ height: Math.min(cropH, windowH), overflow: 'hidden', borderRadius: 12 }}>
+                  <img src={img} width={display} alt="reddit card (reveal preview)" style={{ display: 'block', transform: `translateY(-${shift}px)` }} />
+                </div>
+                {shift > 0 && <div style={{ fontSize: 11, color: '#8ba2ad', marginTop: 6 }}>scrolled {Math.round(shift)}px — older lines exited the top</div>}
+              </div>
+            );
+          })()}
+          {/* full card + debug overlay */}
+          <div style={{ position: 'relative', width: display }}>
+            <img src={img} width={display} alt="reddit card (full)" style={{ display: 'block', borderRadius: 12 }} />
+            <canvas
+              ref={overlayRef}
+              style={{ position: 'absolute', inset: 0, width: display, height: dims.h * scale, pointerEvents: 'none' }}
+            />
+          </div>
+        </div>
+      )}
+      <div style={{ marginTop: 24, fontSize: 12, color: '#8ba2ad' }}>
+        {lines.length} narratable lines · blocks: {new Set(lines.map(l => l.blockIdx)).size} · {dims.w}×{dims.h}px
+        {dwells.map((d, i) => (
+          <span key={i}> · dwell after line {d.afterLineIdx + 1}: hold {d.sec}s to {Math.round(d.bottomFrac * 100)}%</span>
+        ))}
+      </div>
+      {/* The line map as text — exactly what the narrator will read, in order, with each line's block
+          and reveal boundary. This is where an image post shows whether OCR found its text (the lines
+          appear in block 1 between the post text and the first comment) or fell back to the dwell. */}
+      {debug && lines.length > 0 && (
+        <ol data-testid="line-map" style={{ marginTop: 12, fontSize: 12, color: '#d7dadc', lineHeight: 1.7, paddingLeft: 24 }}>
+          {lines.map((l, i) => (
+            <li key={i}>
+              <span style={{ color: '#8ba2ad' }}>b{l.blockIdx} · {Math.round(l.bottomFrac * 100)}%{l.endsBlock ? ' · ¶' : ''} · </span>
+              {l.text}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
